@@ -12,6 +12,7 @@ import { devicesRouter } from "./routes/devices.js";
 import { usersRouter } from "./routes/users.js";
 import { sessionsRouter } from "./routes/sessions.js";
 import { targetsRouter } from "./routes/targets.js";
+import { bootstrap } from "./bootstrap.js";
 
 const PORT = Number(process.env.PORT ?? 3000);
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -86,6 +87,14 @@ if (isProd) {
   }
 }
 
-app.listen(PORT, () => {
-  console.log(`[server] listening on :${PORT}`);
+async function start(): Promise<void> {
+  await bootstrap();
+  app.listen(PORT, () => {
+    console.log(`[server] listening on :${PORT}`);
+  });
+}
+
+start().catch((err) => {
+  console.error("[server] fatal startup error:", err);
+  process.exit(1);
 });
