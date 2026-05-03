@@ -1,0 +1,1962 @@
+From 0be43c66a2e3c5d15ac25efe1cc0373aedad98a0 Mon Sep 17 00:00:00 2001
+From: Claude Code <claude@anthropic.com>
+Date: Sun, 3 May 2026 16:55:53 +0000
+Subject: [PATCH] Add session tracking module: daily device counts + monthly
+ targets
+
+---
+ client/src/App.tsx                        |   6 +
+ client/src/components/Sidebar.tsx         |   5 +-
+ client/src/hooks/usePermissions.ts        |  15 +
+ client/src/i18n/translations.ts           |   6 +
+ client/src/pages/SessionEntry.tsx         | 265 +++++++++
+ client/src/pages/SessionTargets.tsx       | 241 +++++++++
+ client/src/pages/SessionsList.tsx         | 228 ++++++++
+ server/migrations/009_session_tracking.ts | 129 +++++
+ server/migrations/runner.ts               |   3 +-
+ server/routes.ts                          |  18 +-
+ server/sessions_module/permissions.ts     | 123 +++++
+ server/sessions_module/routes.ts          | 630 ++++++++++++++++++++++
+ shared/schema.ts                          |  63 +++
+ 13 files changed, 1729 insertions(+), 3 deletions(-)
+ create mode 100644 client/src/pages/SessionEntry.tsx
+ create mode 100644 client/src/pages/SessionTargets.tsx
+ create mode 100644 client/src/pages/SessionsList.tsx
+ create mode 100644 server/migrations/009_session_tracking.ts
+ create mode 100644 server/sessions_module/permissions.ts
+ create mode 100644 server/sessions_module/routes.ts
+
+diff --git a/client/src/App.tsx b/client/src/App.tsx
+index 138eead..6bd56fe 100644
+--- a/client/src/App.tsx
++++ b/client/src/App.tsx
+@@ -31,6 +31,9 @@ const Accounting = lazy(() => import("@/pages/Accounting"));
+ const Statistics = lazy(() => import("@/pages/Statistics"));
+ const Surveys = lazy(() => import("@/pages/Surveys"));
+ const AdminSettings = lazy(() => import("@/pages/AdminSettings"));
++const SessionEntry = lazy(() => import("@/pages/SessionEntry"));
++const SessionTargets = lazy(() => import("@/pages/SessionTargets"));
++const SessionsList = lazy(() => import("@/pages/SessionsList"));
+ 
+ function DashboardRoute() {
+   const [session, setSession] = useState<{ role?: string } | null>(null);
+@@ -112,6 +115,9 @@ function Router() {
+             <Route path="/statistics" component={Statistics} />
+             <Route path="/accounting" component={Accounting} />
+             <Route path="/surveys" component={Surveys} />
++            <Route path="/session-tracking/entry" component={SessionEntry} />
++            <Route path="/session-tracking/targets" component={SessionTargets} />
++            <Route path="/session-tracking/list" component={SessionsList} />
+             <Route path="/admin" component={AdminSettings} />
+             <Route component={NotFound} />
+           </Switch>
+diff --git a/client/src/components/Sidebar.tsx b/client/src/components/Sidebar.tsx
+index 7affde5..4b77db5 100644
+--- a/client/src/components/Sidebar.tsx
++++ b/client/src/components/Sidebar.tsx
+@@ -1,5 +1,5 @@
+ import { Link, useLocation } from "wouter";
+-import { LayoutDashboard, Users, UserPlus, LogOut, FileBarChart, Building2, ShieldCheck, Menu, X, BarChart3, Calculator, Settings, User, Globe, ClipboardCheck, CalendarDays } from "lucide-react";
++import { LayoutDashboard, Users, UserPlus, LogOut, FileBarChart, Building2, ShieldCheck, Menu, X, BarChart3, Calculator, Settings, User, Globe, ClipboardCheck, CalendarDays, Activity, Target, ClipboardList } from "lucide-react";
+ import { useAuth } from "@/hooks/use-auth";
+ import { cn } from "@/lib/utils";
+ import { clearBranchSession } from "@/components/BranchGate";
+@@ -71,6 +71,9 @@ export function Sidebar() {
+     { label: t.sidebar.branches, icon: Building2, href: "/branches", adminOnly: true, settingKey: null, permission: null },
+     { label: t.sidebar.statistics, icon: BarChart3, href: "/statistics", adminOnly: false, settingKey: "showStatistics" as const, permission: "canViewReports" as const },
+     { label: t.sidebar.surveys, icon: ClipboardCheck, href: "/surveys", adminOnly: false, settingKey: null, permission: "canManageSurveys" as const },
++    { label: t.sidebar.sessionEntry, icon: Activity, href: "/session-tracking/entry", adminOnly: false, settingKey: null, permission: "canEnterSessions" as const },
++    { label: t.sidebar.sessionTargets, icon: Target, href: "/session-tracking/targets", adminOnly: false, settingKey: null, permission: "canManageSessionTargets" as const },
++    { label: t.sidebar.sessionsList, icon: ClipboardList, href: "/session-tracking/list", adminOnly: false, settingKey: null, permission: "canViewSessionsReport" as const },
+     { label: t.sidebar.systemSettings, icon: Settings, href: "/admin", adminOnly: true, settingKey: null, permission: "canManageSettings" as const },
+   ];
+ 
+diff --git a/client/src/hooks/usePermissions.ts b/client/src/hooks/usePermissions.ts
+index ee640e1..2bee1df 100644
+--- a/client/src/hooks/usePermissions.ts
++++ b/client/src/hooks/usePermissions.ts
+@@ -17,6 +17,9 @@ interface UserPermissions {
+   canManageSurveys: boolean;
+   canEditVisits: boolean;
+   canDeleteVisits: boolean;
++  canEnterSessions: boolean;
++  canManageSessionTargets: boolean;
++  canViewSessionsReport: boolean;
+ }
+ 
+ const defaultAdminPermissions: UserPermissions = {
+@@ -36,6 +39,9 @@ const defaultAdminPermissions: UserPermissions = {
+   canManageSurveys: true,
+   canEditVisits: true,
+   canDeleteVisits: true,
++  canEnterSessions: true,
++  canManageSessionTargets: true,
++  canViewSessionsReport: true,
+ };
+ 
+ const defaultBranchPermissions: UserPermissions = {
+@@ -55,6 +61,9 @@ const defaultBranchPermissions: UserPermissions = {
+   canManageSurveys: false,
+   canEditVisits: false,
+   canDeleteVisits: false,
++  canEnterSessions: false,
++  canManageSessionTargets: false,
++  canViewSessionsReport: false,
+ };
+ 
+ export function usePermissions(): UserPermissions {
+@@ -78,6 +87,9 @@ export function usePermissions(): UserPermissions {
+       canManageSurveys: false,
+       canEditVisits: false,
+       canDeleteVisits: false,
++      canEnterSessions: false,
++      canManageSessionTargets: false,
++      canViewSessionsReport: false,
+     };
+   }
+ 
+@@ -100,6 +112,9 @@ export function usePermissions(): UserPermissions {
+       canManageSurveys: perms.canManageSurveys ?? false,
+       canEditVisits: perms.canEditVisits ?? false,
+       canDeleteVisits: perms.canDeleteVisits ?? false,
++      canEnterSessions: perms.canEnterSessions ?? false,
++      canManageSessionTargets: perms.canManageSessionTargets ?? false,
++      canViewSessionsReport: perms.canViewSessionsReport ?? false,
+     };
+   }
+   
+diff --git a/client/src/i18n/translations.ts b/client/src/i18n/translations.ts
+index 940935b..2b45083 100644
+--- a/client/src/i18n/translations.ts
++++ b/client/src/i18n/translations.ts
+@@ -48,6 +48,9 @@ const translations = {
+       systemSettings: "إعدادات النظام",
+       logout: "تسجيل الخروج",
+       centerName: "مجموعة مراكز\nد. ياسر الساعدي",
++      sessionEntry: "إدخال الجلسات",
++      sessionTargets: "أهداف الجلسات",
++      sessionsList: "تقرير الجلسات",
+     },
+     dashboard: {
+       overview: "نظرة عامة",
+@@ -1235,6 +1238,9 @@ const translations = {
+       systemSettings: "System Settings",
+       logout: "Logout",
+       centerName: "Dr. Yasir Al-Saadi\nMedical Centers",
++      sessionEntry: "Session Entry",
++      sessionTargets: "Session Targets",
++      sessionsList: "Sessions Report",
+     },
+     dashboard: {
+       overview: "Overview",
+diff --git a/client/src/pages/SessionEntry.tsx b/client/src/pages/SessionEntry.tsx
+new file mode 100644
+index 0000000..7a18008
+--- /dev/null
++++ b/client/src/pages/SessionEntry.tsx
+@@ -0,0 +1,265 @@
++import { useEffect, useMemo, useState } from "react";
++import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
++import { Card } from "@/components/ui/card";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
++import { Skeleton } from "@/components/ui/skeleton";
++import { useToast } from "@/hooks/use-toast";
++import { useBranchSession } from "@/components/BranchGate";
++import { useTranslation } from "@/i18n/LanguageContext";
++import { apiRequest } from "@/lib/queryClient";
++import { getTodayIraq } from "@/lib/utils";
++
++type Branch = { id: number; name: string };
++type Device = { id: number; code: string; nameAr: string; nameEn: string; displayOrder: number };
++type Shift = "morning" | "evening";
++
++type DailyResponse = {
++  session: { id: number; branchId: number; sessionDate: string; shift: Shift } | null;
++  counts: { deviceId: number; count: number }[];
++};
++
++type MonthlyDevice = {
++  deviceId: number;
++  deviceCode: string;
++  deviceNameAr: string;
++  deviceNameEn: string;
++  target: number;
++  actual: number;
++};
++type MonthlyResponse = { branchId: number; year: number; month: number; devices: MonthlyDevice[] };
++
++function progressColor(pct: number): string {
++  if (pct >= 100) return "bg-emerald-500";
++  if (pct >= 70) return "bg-amber-500";
++  return "bg-rose-500";
++}
++
++export default function SessionEntry() {
++  const { t } = useTranslation();
++  const lang = t.dir === "rtl" ? "ar" : "en";
++  const session = useBranchSession();
++  const isReception = session?.role === "reception";
++  const isAdmin = Boolean(session?.isAdmin);
++  const today = getTodayIraq();
++
++  const { data: branches = [] } = useQuery<Branch[]>({
++    queryKey: ["/api/session-tracking/branches"],
++  });
++  const { data: devices = [] } = useQuery<Device[]>({
++    queryKey: ["/api/session-tracking/devices"],
++  });
++
++  const [branchId, setBranchId] = useState<number | null>(null);
++  const [date, setDate] = useState<string>(today);
++  const [shift, setShift] = useState<Shift>("morning");
++  const [counts, setCounts] = useState<Record<number, number>>({});
++
++  // Pick a sensible default branch once the list loads.
++  useEffect(() => {
++    if (branchId !== null) return;
++    if (session?.branchId && branches.some((b) => b.id === session.branchId)) {
++      setBranchId(session.branchId);
++    } else if (branches[0]) {
++      setBranchId(branches[0].id);
++    }
++  }, [branches, branchId, session?.branchId]);
++
++  // Reception is locked to today.
++  useEffect(() => {
++    if (isReception && date !== today) setDate(today);
++  }, [isReception, date, today]);
++
++  const dailyQ = useQuery<DailyResponse>({
++    queryKey: ["/api/session-tracking/daily", branchId ?? "", date, shift],
++    queryFn: async () => {
++      const res = await fetch(
++        `/api/session-tracking/daily?branchId=${branchId}&date=${date}&shift=${shift}`,
++        { credentials: "include" },
++      );
++      if (!res.ok) throw new Error(String(res.status));
++      return res.json();
++    },
++    enabled: branchId !== null,
++  });
++
++  // Reset the input grid whenever the loaded session changes.
++  useEffect(() => {
++    if (!dailyQ.data) return;
++    const next: Record<number, number> = {};
++    for (const c of dailyQ.data.counts) next[c.deviceId] = c.count;
++    setCounts(next);
++  }, [dailyQ.data]);
++
++  const month = Number(date.slice(5, 7));
++  const year = Number(date.slice(0, 4));
++  const monthlyQ = useQuery<MonthlyResponse>({
++    queryKey: ["/api/session-tracking/monthly", branchId ?? "", year, month],
++    queryFn: async () => {
++      const res = await fetch(
++        `/api/session-tracking/monthly?branchId=${branchId}&year=${year}&month=${month}`,
++        { credentials: "include" },
++      );
++      if (!res.ok) throw new Error(String(res.status));
++      return res.json();
++    },
++    enabled: branchId !== null,
++  });
++
++  const monthlyByDevice = useMemo(() => {
++    const m = new Map<number, MonthlyDevice>();
++    for (const d of monthlyQ.data?.devices ?? []) m.set(d.deviceId, d);
++    return m;
++  }, [monthlyQ.data]);
++
++  const qc = useQueryClient();
++  const { toast } = useToast();
++
++  const saveMut = useMutation({
++    mutationFn: async () => {
++      const body = {
++        branchId,
++        sessionDate: date,
++        shift,
++        counts: devices.map((d) => ({ deviceId: d.id, count: counts[d.id] ?? 0 })),
++      };
++      const res = await apiRequest("POST", "/api/session-tracking/daily/upsert", body);
++      return res.json();
++    },
++    onSuccess: () => {
++      toast({
++        title: lang === "ar" ? "تم الحفظ" : "Saved",
++        description: lang === "ar" ? "تم حفظ جلسة اليوم بنجاح" : "Daily session saved",
++      });
++      qc.invalidateQueries({ queryKey: ["/api/session-tracking/daily"] });
++      qc.invalidateQueries({ queryKey: ["/api/session-tracking/monthly"] });
++    },
++    onError: (err: Error) => {
++      toast({
++        title: lang === "ar" ? "تعذّر الحفظ" : "Save failed",
++        description: err.message,
++        variant: "destructive",
++      });
++    },
++  });
++
++  if (!session) return null;
++
++  return (
++    <div className="space-y-6">
++      <div>
++        <h1 className="text-2xl font-bold">
++          {lang === "ar" ? "إدخال الجلسات اليومية" : "Daily Session Entry"}
++        </h1>
++        <p className="text-sm text-muted-foreground">
++          {lang === "ar"
++            ? "سجّل عدد جلسات كلّ جهاز للوردية المحدّدة، ولاحظ التقدّم الشهري لكلّ جهاز."
++            : "Enter device session counts for the selected shift and watch monthly progress."}
++        </p>
++      </div>
++
++      <Card className="p-4">
++        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
++          <div>
++            <Label>{lang === "ar" ? "الفرع" : "Branch"}</Label>
++            <Select
++              value={branchId ? String(branchId) : ""}
++              onValueChange={(v) => setBranchId(Number(v))}
++              disabled={!isAdmin && !(session.accessibleBranches && session.accessibleBranches.length > 1)}
++            >
++              <SelectTrigger>
++                <SelectValue />
++              </SelectTrigger>
++              <SelectContent>
++                {branches.map((b) => (
++                  <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>
++                ))}
++              </SelectContent>
++            </Select>
++          </div>
++          <div>
++            <Label>{lang === "ar" ? "التاريخ" : "Date"}</Label>
++            <Input
++              type="date"
++              value={date}
++              min={isReception ? today : undefined}
++              max={isReception ? today : undefined}
++              onChange={(e) => setDate(e.target.value)}
++            />
++          </div>
++          <div>
++            <Label>{lang === "ar" ? "الوردية" : "Shift"}</Label>
++            <Select value={shift} onValueChange={(v) => setShift(v as Shift)}>
++              <SelectTrigger>
++                <SelectValue />
++              </SelectTrigger>
++              <SelectContent>
++                <SelectItem value="morning">{lang === "ar" ? "صباحية" : "Morning"}</SelectItem>
++                <SelectItem value="evening">{lang === "ar" ? "مسائية" : "Evening"}</SelectItem>
++              </SelectContent>
++            </Select>
++          </div>
++        </div>
++      </Card>
++
++      <Card className="p-4">
++        {dailyQ.isLoading || monthlyQ.isLoading ? (
++          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
++            {Array.from({ length: 9 }).map((_, i) => (
++              <Skeleton key={i} className="h-20" />
++            ))}
++          </div>
++        ) : (
++          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
++            {devices.map((d) => {
++              const monthly = monthlyByDevice.get(d.id);
++              const target = monthly?.target ?? 0;
++              const actual = monthly?.actual ?? 0;
++              const pct = target > 0 ? Math.round((actual / target) * 100) : 0;
++              const visualPct = Math.min(pct, 100);
++              return (
++                <div key={d.id} className="border rounded-lg p-3 space-y-2">
++                  <div className="flex items-center justify-between">
++                    <div className="font-medium">{lang === "ar" ? d.nameAr : d.nameEn}</div>
++                    <div className="text-xs text-muted-foreground">
++                      {actual} / {target || "—"} {target > 0 ? `(${pct}%)` : ""}
++                    </div>
++                  </div>
++                  {target > 0 && (
++                    <div className="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
++                      <div
++                        className={`h-full ${progressColor(pct)}`}
++                        style={{ width: `${visualPct}%` }}
++                      />
++                    </div>
++                  )}
++                  <Input
++                    type="number"
++                    min={0}
++                    inputMode="numeric"
++                    value={counts[d.id] ?? 0}
++                    onChange={(e) =>
++                      setCounts({ ...counts, [d.id]: Math.max(0, Number(e.target.value || 0)) })
++                    }
++                  />
++                </div>
++              );
++            })}
++          </div>
++        )}
++        <div className="flex justify-end mt-4">
++          <Button
++            onClick={() => saveMut.mutate()}
++            disabled={saveMut.isPending || branchId === null}
++          >
++            {saveMut.isPending
++              ? lang === "ar" ? "جاري الحفظ..." : "Saving..."
++              : lang === "ar" ? "حفظ" : "Save"}
++          </Button>
++        </div>
++      </Card>
++    </div>
++  );
++}
+diff --git a/client/src/pages/SessionTargets.tsx b/client/src/pages/SessionTargets.tsx
+new file mode 100644
+index 0000000..fe24815
+--- /dev/null
++++ b/client/src/pages/SessionTargets.tsx
+@@ -0,0 +1,241 @@
++import { useEffect, useMemo, useState } from "react";
++import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
++import { Card } from "@/components/ui/card";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
++import { Skeleton } from "@/components/ui/skeleton";
++import { useToast } from "@/hooks/use-toast";
++import { useBranchSession } from "@/components/BranchGate";
++import { useTranslation } from "@/i18n/LanguageContext";
++import { apiRequest } from "@/lib/queryClient";
++
++type Branch = { id: number; name: string };
++type MonthlyDevice = {
++  deviceId: number;
++  deviceCode: string;
++  deviceNameAr: string;
++  deviceNameEn: string;
++  target: number;
++  actual: number;
++};
++type MonthlyResponse = { branchId: number; year: number; month: number; devices: MonthlyDevice[] };
++
++const MONTHS_AR = [
++  "كانون الثاني", "شباط", "آذار", "نيسان", "أيار", "حزيران",
++  "تموز", "آب", "أيلول", "تشرين الأول", "تشرين الثاني", "كانون الأول",
++];
++const MONTHS_EN = [
++  "January", "February", "March", "April", "May", "June",
++  "July", "August", "September", "October", "November", "December",
++];
++
++export default function SessionTargets() {
++  const { t } = useTranslation();
++  const lang = t.dir === "rtl" ? "ar" : "en";
++  const session = useBranchSession();
++  const isAdmin = Boolean(session?.isAdmin);
++
++  const today = new Date();
++  const [branchId, setBranchId] = useState<number | null>(null);
++  const [year, setYear] = useState<number>(today.getFullYear());
++  const [month, setMonth] = useState<number>(today.getMonth() + 1);
++  const [draft, setDraft] = useState<Record<number, number>>({});
++
++  const { data: branches = [] } = useQuery<Branch[]>({
++    queryKey: ["/api/session-tracking/branches"],
++  });
++
++  useEffect(() => {
++    if (branchId !== null) return;
++    if (session?.branchId && branches.some((b) => b.id === session.branchId)) {
++      setBranchId(session.branchId);
++    } else if (branches[0]) {
++      setBranchId(branches[0].id);
++    }
++  }, [branches, branchId, session?.branchId]);
++
++  const monthlyQ = useQuery<MonthlyResponse>({
++    queryKey: ["/api/session-tracking/monthly", branchId ?? "", year, month],
++    queryFn: async () => {
++      const res = await fetch(
++        `/api/session-tracking/monthly?branchId=${branchId}&year=${year}&month=${month}`,
++        { credentials: "include" },
++      );
++      if (!res.ok) throw new Error(String(res.status));
++      return res.json();
++    },
++    enabled: branchId !== null,
++  });
++
++  useEffect(() => {
++    if (!monthlyQ.data) return;
++    const next: Record<number, number> = {};
++    for (const d of monthlyQ.data.devices) next[d.deviceId] = d.target;
++    setDraft(next);
++  }, [monthlyQ.data]);
++
++  const qc = useQueryClient();
++  const { toast } = useToast();
++
++  const saveMut = useMutation({
++    mutationFn: async () => {
++      const targets = (monthlyQ.data?.devices ?? []).map((d) => ({
++        deviceId: d.deviceId,
++        targetCount: draft[d.deviceId] ?? 0,
++      }));
++      const res = await apiRequest("POST", "/api/session-tracking/targets/upsert", {
++        branchId, year, month, targets,
++      });
++      return res.json();
++    },
++    onSuccess: () => {
++      toast({
++        title: lang === "ar" ? "تم الحفظ" : "Saved",
++        description: lang === "ar" ? "تم حفظ الأهداف الشهرية" : "Monthly targets saved",
++      });
++      qc.invalidateQueries({ queryKey: ["/api/session-tracking/monthly"] });
++    },
++    onError: (err: Error) => {
++      toast({ title: lang === "ar" ? "تعذّر الحفظ" : "Save failed", description: err.message, variant: "destructive" });
++    },
++  });
++
++  const copyMut = useMutation({
++    mutationFn: async () => {
++      const fromMonth = month === 1 ? 12 : month - 1;
++      const fromYear = month === 1 ? year - 1 : year;
++      const res = await apiRequest("POST", "/api/session-tracking/targets/copy", {
++        branchId, fromYear, fromMonth, toYear: year, toMonth: month,
++      });
++      return res.json();
++    },
++    onSuccess: (data: { copied: number }) => {
++      toast({
++        title: lang === "ar" ? "تم النسخ" : "Copied",
++        description: lang === "ar" ? `تم نسخ ${data.copied} هدف` : `Copied ${data.copied} targets`,
++      });
++      qc.invalidateQueries({ queryKey: ["/api/session-tracking/monthly"] });
++    },
++    onError: (err: Error) => {
++      toast({ title: lang === "ar" ? "تعذّر النسخ" : "Copy failed", description: err.message, variant: "destructive" });
++    },
++  });
++
++  const months = lang === "ar" ? MONTHS_AR : MONTHS_EN;
++  const years = useMemo(() => {
++    const cur = today.getFullYear();
++    return [cur - 1, cur, cur + 1];
++  }, [today]);
++
++  if (!session) return null;
++
++  return (
++    <div className="space-y-6">
++      <div>
++        <h1 className="text-2xl font-bold">
++          {lang === "ar" ? "الأهداف الشهرية للجلسات" : "Monthly Session Targets"}
++        </h1>
++        <p className="text-sm text-muted-foreground">
++          {lang === "ar"
++            ? "حدّد عدد الجلسات المستهدف لكلّ جهاز خلال الشهر، ويمكنك نسخ أهداف الشهر السابق."
++            : "Set the target session count per device for the month. You can copy from the previous month."}
++        </p>
++      </div>
++
++      <Card className="p-4">
++        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
++          <div>
++            <Label>{lang === "ar" ? "الفرع" : "Branch"}</Label>
++            <Select
++              value={branchId ? String(branchId) : ""}
++              onValueChange={(v) => setBranchId(Number(v))}
++              disabled={!isAdmin && !(session.accessibleBranches && session.accessibleBranches.length > 1)}
++            >
++              <SelectTrigger><SelectValue /></SelectTrigger>
++              <SelectContent>
++                {branches.map((b) => (
++                  <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>
++                ))}
++              </SelectContent>
++            </Select>
++          </div>
++          <div>
++            <Label>{lang === "ar" ? "السنة" : "Year"}</Label>
++            <Select value={String(year)} onValueChange={(v) => setYear(Number(v))}>
++              <SelectTrigger><SelectValue /></SelectTrigger>
++              <SelectContent>
++                {years.map((y) => (
++                  <SelectItem key={y} value={String(y)}>{y}</SelectItem>
++                ))}
++              </SelectContent>
++            </Select>
++          </div>
++          <div>
++            <Label>{lang === "ar" ? "الشهر" : "Month"}</Label>
++            <Select value={String(month)} onValueChange={(v) => setMonth(Number(v))}>
++              <SelectTrigger><SelectValue /></SelectTrigger>
++              <SelectContent>
++                {months.map((m, i) => (
++                  <SelectItem key={i + 1} value={String(i + 1)}>{m}</SelectItem>
++                ))}
++              </SelectContent>
++            </Select>
++          </div>
++          <div className="flex items-end">
++            <Button
++              variant="outline"
++              className="w-full"
++              onClick={() => copyMut.mutate()}
++              disabled={copyMut.isPending || branchId === null}
++            >
++              {lang === "ar" ? "نسخ من الشهر السابق" : "Copy previous month"}
++            </Button>
++          </div>
++        </div>
++      </Card>
++
++      <Card className="p-4">
++        {monthlyQ.isLoading ? (
++          <div className="space-y-2">
++            {Array.from({ length: 6 }).map((_, i) => (
++              <Skeleton key={i} className="h-12" />
++            ))}
++          </div>
++        ) : (
++          <div className="space-y-2">
++            <div className="grid grid-cols-12 gap-2 text-xs text-muted-foreground font-medium px-2">
++              <div className="col-span-5">{lang === "ar" ? "الجهاز" : "Device"}</div>
++              <div className="col-span-3 text-end">{lang === "ar" ? "الفعلي" : "Actual"}</div>
++              <div className="col-span-4 text-end">{lang === "ar" ? "الهدف" : "Target"}</div>
++            </div>
++            {(monthlyQ.data?.devices ?? []).map((d) => (
++              <div key={d.deviceId} className="grid grid-cols-12 gap-2 items-center px-2 py-1 border-b">
++                <div className="col-span-5">{lang === "ar" ? d.deviceNameAr : d.deviceNameEn}</div>
++                <div className="col-span-3 text-end tabular-nums">{d.actual}</div>
++                <div className="col-span-4">
++                  <Input
++                    type="number"
++                    min={0}
++                    value={draft[d.deviceId] ?? 0}
++                    onChange={(e) =>
++                      setDraft({ ...draft, [d.deviceId]: Math.max(0, Number(e.target.value || 0)) })
++                    }
++                  />
++                </div>
++              </div>
++            ))}
++          </div>
++        )}
++        <div className="flex justify-end mt-4">
++          <Button onClick={() => saveMut.mutate()} disabled={saveMut.isPending || branchId === null}>
++            {saveMut.isPending
++              ? lang === "ar" ? "جاري الحفظ..." : "Saving..."
++              : lang === "ar" ? "حفظ الأهداف" : "Save targets"}
++          </Button>
++        </div>
++      </Card>
++    </div>
++  );
++}
+diff --git a/client/src/pages/SessionsList.tsx b/client/src/pages/SessionsList.tsx
+new file mode 100644
+index 0000000..7f7a30b
+--- /dev/null
++++ b/client/src/pages/SessionsList.tsx
+@@ -0,0 +1,228 @@
++import { useEffect, useMemo, useState } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { Card } from "@/components/ui/card";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
++import { Skeleton } from "@/components/ui/skeleton";
++import { useBranchSession } from "@/components/BranchGate";
++import { useTranslation } from "@/i18n/LanguageContext";
++import { getTodayIraq } from "@/lib/utils";
++
++type Branch = { id: number; name: string };
++type Device = { id: number; nameAr: string; nameEn: string; displayOrder: number };
++type Session = { id: number; branchId: number; sessionDate: string; shift: "morning" | "evening" };
++type Count = { dailySessionId: number; deviceId: number; count: number };
++type ListResponse = { sessions: Session[]; counts: Count[]; devices: Device[] };
++
++function firstOfMonth(today: string): string {
++  return today.slice(0, 7) + "-01";
++}
++
++export default function SessionsList() {
++  const { t } = useTranslation();
++  const lang = t.dir === "rtl" ? "ar" : "en";
++  const session = useBranchSession();
++  const isAdmin = Boolean(session?.isAdmin);
++
++  const today = getTodayIraq();
++  const [branchId, setBranchId] = useState<number | "all">("all");
++  const [from, setFrom] = useState<string>(firstOfMonth(today));
++  const [to, setTo] = useState<string>(today);
++
++  const { data: branches = [] } = useQuery<Branch[]>({
++    queryKey: ["/api/session-tracking/branches"],
++  });
++
++  useEffect(() => {
++    if (branchId !== "all") return;
++    if (!isAdmin && session?.branchId) setBranchId(session.branchId);
++  }, [isAdmin, session?.branchId, branchId]);
++
++  const listQ = useQuery<ListResponse>({
++    queryKey: ["/api/session-tracking/list", branchId, from, to],
++    queryFn: async () => {
++      const params = new URLSearchParams({ from, to });
++      if (branchId !== "all") params.set("branchId", String(branchId));
++      const res = await fetch(`/api/session-tracking/list?${params.toString()}`, {
++        credentials: "include",
++      });
++      if (!res.ok) throw new Error(String(res.status));
++      return res.json();
++    },
++  });
++
++  const branchName = useMemo(() => {
++    const m = new Map(branches.map((b) => [b.id, b.name]));
++    return (id: number) => m.get(id) ?? `#${id}`;
++  }, [branches]);
++
++  const pivot = useMemo(() => {
++    const data = listQ.data;
++    if (!data) return null;
++    const countByPair = new Map<string, number>();
++    for (const c of data.counts) {
++      countByPair.set(`${c.dailySessionId}:${c.deviceId}`, c.count);
++    }
++    const rows = data.sessions.map((s) => {
++      const cells = data.devices.map((d) => countByPair.get(`${s.id}:${d.id}`) ?? 0);
++      const total = cells.reduce((a, b) => a + b, 0);
++      return { session: s, cells, total };
++    });
++    const colTotals = data.devices.map((_, i) =>
++      rows.reduce((sum, r) => sum + (r.cells[i] ?? 0), 0),
++    );
++    const grandTotal = colTotals.reduce((a, b) => a + b, 0);
++    return { rows, colTotals, grandTotal, devices: data.devices };
++  }, [listQ.data]);
++
++  function exportCsv(): void {
++    if (!pivot) return;
++    const headerLabels = [
++      lang === "ar" ? "التاريخ" : "Date",
++      lang === "ar" ? "الفرع" : "Branch",
++      lang === "ar" ? "الوردية" : "Shift",
++      ...pivot.devices.map((d) => (lang === "ar" ? d.nameAr : d.nameEn)),
++      lang === "ar" ? "المجموع" : "Total",
++    ];
++    const lines = [headerLabels.join(",")];
++    for (const r of pivot.rows) {
++      lines.push(
++        [
++          r.session.sessionDate,
++          escapeCsv(branchName(r.session.branchId)),
++          r.session.shift,
++          ...r.cells.map(String),
++          String(r.total),
++        ].join(","),
++      );
++    }
++    lines.push(
++      [
++        lang === "ar" ? "المجموع" : "Total",
++        "",
++        "",
++        ...pivot.colTotals.map(String),
++        String(pivot.grandTotal),
++      ].join(","),
++    );
++    const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
++    const url = URL.createObjectURL(blob);
++    const a = document.createElement("a");
++    a.href = url;
++    a.download = `sessions-${from}-to-${to}.csv`;
++    a.click();
++    URL.revokeObjectURL(url);
++  }
++
++  if (!session) return null;
++
++  return (
++    <div className="space-y-6">
++      <div className="flex items-start justify-between flex-wrap gap-2">
++        <div>
++          <h1 className="text-2xl font-bold">
++            {lang === "ar" ? "تقرير الجلسات" : "Sessions Report"}
++          </h1>
++          <p className="text-sm text-muted-foreground">
++            {lang === "ar"
++              ? "اعرض الجلسات اليومية مفصّلة حسب الجهاز ضمن نطاق زمني."
++              : "Browse daily sessions broken down per device for a date range."}
++          </p>
++        </div>
++        <Button onClick={exportCsv} disabled={!pivot || pivot.rows.length === 0}>
++          {lang === "ar" ? "تصدير CSV" : "Export CSV"}
++        </Button>
++      </div>
++
++      <Card className="p-4">
++        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
++          <div>
++            <Label>{lang === "ar" ? "الفرع" : "Branch"}</Label>
++            <Select
++              value={String(branchId)}
++              onValueChange={(v) => setBranchId(v === "all" ? "all" : Number(v))}
++              disabled={!isAdmin}
++            >
++              <SelectTrigger><SelectValue /></SelectTrigger>
++              <SelectContent>
++                {isAdmin && <SelectItem value="all">{lang === "ar" ? "كلّ الفروع" : "All branches"}</SelectItem>}
++                {branches.map((b) => (
++                  <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>
++                ))}
++              </SelectContent>
++            </Select>
++          </div>
++          <div>
++            <Label>{lang === "ar" ? "من" : "From"}</Label>
++            <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
++          </div>
++          <div>
++            <Label>{lang === "ar" ? "إلى" : "To"}</Label>
++            <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
++          </div>
++        </div>
++      </Card>
++
++      <Card className="p-4 overflow-x-auto">
++        {listQ.isLoading ? (
++          <Skeleton className="h-64" />
++        ) : !pivot || pivot.rows.length === 0 ? (
++          <div className="text-center text-muted-foreground py-12">
++            {lang === "ar" ? "لا توجد جلسات في هذه الفترة" : "No sessions in this range"}
++          </div>
++        ) : (
++          <table className="w-full text-sm border-collapse">
++            <thead>
++              <tr className="border-b">
++                <th className="p-2 text-start whitespace-nowrap">{lang === "ar" ? "التاريخ" : "Date"}</th>
++                <th className="p-2 text-start whitespace-nowrap">{lang === "ar" ? "الفرع" : "Branch"}</th>
++                <th className="p-2 text-start whitespace-nowrap">{lang === "ar" ? "الوردية" : "Shift"}</th>
++                {pivot.devices.map((d) => (
++                  <th key={d.id} className="p-2 text-end whitespace-nowrap">
++                    {lang === "ar" ? d.nameAr : d.nameEn}
++                  </th>
++                ))}
++                <th className="p-2 text-end whitespace-nowrap font-bold">
++                  {lang === "ar" ? "المجموع" : "Total"}
++                </th>
++              </tr>
++            </thead>
++            <tbody>
++              {pivot.rows.map((r) => (
++                <tr key={r.session.id} className="border-b hover:bg-slate-50">
++                  <td className="p-2 whitespace-nowrap">{r.session.sessionDate}</td>
++                  <td className="p-2 whitespace-nowrap">{branchName(r.session.branchId)}</td>
++                  <td className="p-2 whitespace-nowrap">
++                    {r.session.shift === "morning"
++                      ? (lang === "ar" ? "صباحية" : "Morning")
++                      : (lang === "ar" ? "مسائية" : "Evening")}
++                  </td>
++                  {r.cells.map((c, i) => (
++                    <td key={i} className="p-2 text-end tabular-nums">{c}</td>
++                  ))}
++                  <td className="p-2 text-end tabular-nums font-bold">{r.total}</td>
++                </tr>
++              ))}
++              <tr className="bg-slate-50 font-bold">
++                <td className="p-2" colSpan={3}>{lang === "ar" ? "المجموع" : "Total"}</td>
++                {pivot.colTotals.map((t, i) => (
++                  <td key={i} className="p-2 text-end tabular-nums">{t}</td>
++                ))}
++                <td className="p-2 text-end tabular-nums">{pivot.grandTotal}</td>
++              </tr>
++            </tbody>
++          </table>
++        )}
++      </Card>
++    </div>
++  );
++}
++
++function escapeCsv(s: string): string {
++  if (/[,"\n]/.test(s)) {
++    return `"${s.replace(/"/g, '""')}"`;
++  }
++  return s;
++}
+diff --git a/server/migrations/009_session_tracking.ts b/server/migrations/009_session_tracking.ts
+new file mode 100644
+index 0000000..46642e2
+--- /dev/null
++++ b/server/migrations/009_session_tracking.ts
+@@ -0,0 +1,129 @@
++// Migration 009: session tracking module
++//
++// Adds the "متابعة الجلسات اليومية" feature merged from the standalone
++// bionic-analytics app. Tracks per-branch / per-day / per-shift counts
++// for each of 15 physiotherapy devices, plus monthly targets per
++// branch+device. Reception enters today's counts; managers edit
++// historical data and set targets; admin sees everything.
++//
++// All additive — no DROP, no ALTER on existing columns. Three new
++// permission columns on system_users gate access to the new module.
++//
++// Tables:
++//   devices                — 15 physiotherapy devices, seeded below.
++//   daily_sessions         — one row per (branch, date, shift).
++//   session_counts         — one row per (daily_session, device).
++//   monthly_targets        — one row per (branch, device, year, month).
++//
++// Existing audit_log is reused with entity_type = 'daily_session' or
++// 'monthly_target' so we don't fragment audit history.
++
++export const name = "009_session_tracking";
++
++export const sql = `
++-- shift enum
++DO $$ BEGIN
++  CREATE TYPE shift AS ENUM ('morning', 'evening');
++EXCEPTION WHEN duplicate_object THEN NULL;
++END $$;
++
++-- 1. devices catalog
++CREATE TABLE IF NOT EXISTS devices (
++  id            SERIAL PRIMARY KEY,
++  code          TEXT NOT NULL UNIQUE,
++  name_ar       TEXT NOT NULL,
++  name_en       TEXT NOT NULL,
++  display_order INTEGER NOT NULL DEFAULT 0,
++  is_active     BOOLEAN NOT NULL DEFAULT TRUE,
++  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
++);
++
++-- 2. daily_sessions: one row per (branch, date, shift)
++CREATE TABLE IF NOT EXISTS daily_sessions (
++  id            SERIAL PRIMARY KEY,
++  branch_id     INTEGER NOT NULL REFERENCES branches(id),
++  session_date  DATE NOT NULL,
++  shift         shift NOT NULL,
++  created_by    INTEGER NOT NULL REFERENCES system_users(id),
++  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++  CONSTRAINT daily_sessions_branch_date_shift_uq
++    UNIQUE (branch_id, session_date, shift)
++);
++
++CREATE INDEX IF NOT EXISTS daily_sessions_branch_date_idx
++  ON daily_sessions (branch_id, session_date);
++
++-- 3. session_counts: one row per (daily_session, device)
++CREATE TABLE IF NOT EXISTS session_counts (
++  id                 SERIAL PRIMARY KEY,
++  daily_session_id   INTEGER NOT NULL REFERENCES daily_sessions(id) ON DELETE CASCADE,
++  device_id          INTEGER NOT NULL REFERENCES devices(id),
++  count              INTEGER NOT NULL DEFAULT 0,
++  CONSTRAINT session_counts_session_device_uq
++    UNIQUE (daily_session_id, device_id),
++  CONSTRAINT session_counts_count_nonneg CHECK (count >= 0)
++);
++
++-- 4. monthly_targets: one row per (branch, device, year, month)
++CREATE TABLE IF NOT EXISTS monthly_targets (
++  id            SERIAL PRIMARY KEY,
++  branch_id     INTEGER NOT NULL REFERENCES branches(id),
++  device_id     INTEGER NOT NULL REFERENCES devices(id),
++  year          INTEGER NOT NULL,
++  month         INTEGER NOT NULL,
++  target_count  INTEGER NOT NULL DEFAULT 0,
++  set_by        INTEGER NOT NULL REFERENCES system_users(id),
++  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++  CONSTRAINT monthly_targets_branch_device_year_month_uq
++    UNIQUE (branch_id, device_id, year, month),
++  CONSTRAINT monthly_targets_target_nonneg CHECK (target_count >= 0),
++  CONSTRAINT monthly_targets_month_range  CHECK (month BETWEEN 1 AND 12)
++);
++
++CREATE INDEX IF NOT EXISTS monthly_targets_branch_year_month_idx
++  ON monthly_targets (branch_id, year, month);
++
++-- 5. New permission columns on system_users for the sessions module
++ALTER TABLE system_users
++  ADD COLUMN IF NOT EXISTS can_enter_sessions BOOLEAN DEFAULT FALSE;
++
++ALTER TABLE system_users
++  ADD COLUMN IF NOT EXISTS can_manage_session_targets BOOLEAN DEFAULT FALSE;
++
++ALTER TABLE system_users
++  ADD COLUMN IF NOT EXISTS can_view_sessions_report BOOLEAN DEFAULT FALSE;
++
++-- Auto-grant existing reception and branch_manager users so they can use
++-- the new module immediately. Admin role bypasses these checks at the
++-- code layer so no row-level grant needed.
++UPDATE system_users
++   SET can_enter_sessions = TRUE
++ WHERE role IN ('reception', 'branch_manager')
++   AND can_enter_sessions = FALSE;
++
++UPDATE system_users
++   SET can_manage_session_targets = TRUE,
++       can_view_sessions_report   = TRUE
++ WHERE role = 'branch_manager'
++   AND can_manage_session_targets = FALSE;
++
++-- 6. Seed the 15 physiotherapy devices in the spec'd display order
++INSERT INTO devices (code, name_ar, name_en, display_order) VALUES
++  ('megnatik',    'مغناطيس',         'Magnetic Therapy',  1),
++  ('laser',       'ليزر',            'Laser',             2),
++  ('tecar',       'تيكار',           'Tecar',             3),
++  ('exercise',    'تمارين',          'Exercise',          4),
++  ('ultrasound',  'أمواج فوق صوتية', 'Ultrasound',        5),
++  ('traction',    'شد',              'Traction',          6),
++  ('shockwaves',  'موجات صادمة',     'Shockwaves',        7),
++  ('electro',     'كهربائي',         'Electrotherapy',    8),
++  ('compression', 'ضغط',             'Compression',       9),
++  ('infrared',    'أشعة تحت حمراء',  'Infrared',         10),
++  ('hot_pack',    'كمادات حارة',     'Hot Pack',         11),
++  ('wax',         'شمع',             'Wax',              12),
++  ('cpm',         'تحريك مستمر',     'CPM',              13),
++  ('robotik',     'روبوتيك',         'Robotik',          14),
++  ('needle',      'إبر',             'Needle',           15)
++ON CONFLICT (code) DO NOTHING;
++`;
+diff --git a/server/migrations/runner.ts b/server/migrations/runner.ts
+index adf000f..2ca030c 100644
+--- a/server/migrations/runner.ts
++++ b/server/migrations/runner.ts
+@@ -7,6 +7,7 @@ import * as migration004 from "./004_ai_memory";
+ import * as migration005 from "./005_performance_indexes";
+ import * as migration007 from "./007_multi_branch_managers";
+ import * as migration008 from "./008_visit_permissions";
++import * as migration009 from "./009_session_tracking";
+ 
+ /**
+  * Migration Runner
+@@ -30,7 +31,7 @@ interface Migration {
+ }
+ 
+ // Ordered list of migrations. Add new ones at the end.
+-const migrations: Migration[] = [migration001, migration002, migration003, migration004, migration005, migration007, migration008];
++const migrations: Migration[] = [migration001, migration002, migration003, migration004, migration005, migration007, migration008, migration009];
+ 
+ async function runSqlMigration(migration: Migration): Promise<void> {
+   const client = await pool.connect();
+diff --git a/server/routes.ts b/server/routes.ts
+index 3a0e10b..c81e042 100644
+--- a/server/routes.ts
++++ b/server/routes.ts
+@@ -13,6 +13,7 @@ import path from "path";
+ import fs from "fs";
+ import bcrypt from "bcryptjs";
+ import { registerAccountingV2Routes } from "./accounting/routes";
++import { registerSessionTrackingRoutes } from "./sessions_module/routes";
+ import {
+   createJournalForPayment,
+   createJournalForExpense,
+@@ -175,8 +176,11 @@ export async function registerRoutes(
+       canManageUsers: true,
+       canManageTreatmentPlans: true,
+       canManageSurveys: true,
++      canEnterSessions: true,
++      canManageSessionTargets: true,
++      canViewSessionsReport: true,
+     };
+-    
++
+     // Default branch staff permissions — matches schema defaults in system_users:
+     // add-only access, edit/delete reserved for admin per policy. Stored
+     // per-user permissions from the database override this fallback.
+@@ -195,6 +199,9 @@ export async function registerRoutes(
+       canManageUsers: false,
+       canManageTreatmentPlans: false,
+       canManageSurveys: true,
++      canEnterSessions: false,
++      canManageSessionTargets: false,
++      canViewSessionsReport: false,
+     };
+     
+     // Return stored permissions if available, else default based on admin status
+@@ -333,6 +340,12 @@ export async function registerRoutes(
+             // else uses whatever the admin toggled on their row.
+             canEditVisits: grantAll || systemUser.canEditVisits,
+             canDeleteVisits: grantAll || systemUser.canDeleteVisits,
++            // Sessions module (migration 009): reception auto-grants entry,
++            // branch_manager auto-grants all three. Anyone else uses the
++            // toggles set on their row.
++            canEnterSessions: grantAll || isReception || systemUser.canEnterSessions,
++            canManageSessionTargets: grantAll || systemUser.canManageSessionTargets,
++            canViewSessionsReport: grantAll || systemUser.canViewSessionsReport,
+           };
+ 
+           // Store session with user permissions
+@@ -4725,5 +4738,8 @@ export async function registerRoutes(
+   // Register accounting v2 routes (chart of accounts, journal, reports, audit)
+   registerAccountingV2Routes(app, isAuthenticated);
+ 
++  // Register session tracking routes (daily device counts + monthly targets)
++  registerSessionTrackingRoutes(app, isAuthenticated);
++
+   return httpServer;
+ }
+diff --git a/server/sessions_module/permissions.ts b/server/sessions_module/permissions.ts
+new file mode 100644
+index 0000000..e3f1460
+--- /dev/null
++++ b/server/sessions_module/permissions.ts
+@@ -0,0 +1,123 @@
++import type { Request, Response } from "express";
++
++export type BranchSession = {
++  branchId?: number | null;
++  accessibleBranches?: number[];
++  isAdmin?: boolean;
++  userId?: number | null;
++  role?: string;
++  displayName?: string | null;
++  permissions?: Record<string, boolean | undefined>;
++};
++
++export function getSession(req: Request): BranchSession | null {
++  const s = (req.session as any)?.branchSession;
++  return s ?? null;
++}
++
++export function getUserContext(req: Request) {
++  const s = getSession(req);
++  return {
++    userId: s?.userId ?? null,
++    userName: s?.displayName ?? null,
++    branchId: s?.branchId ?? null,
++    isAdmin: Boolean(s?.isAdmin),
++    role: s?.role ?? "",
++    ipAddress: req.ip ?? null,
++    userAgent: req.get("user-agent") ?? null,
++  };
++}
++
++// Returns the list of branch IDs the requester may act on. Admin returns
++// null = all. Non-admin returns accessibleBranches when set, else falls
++// back to the single branchId.
++export function accessibleBranchesFor(req: Request): number[] | null {
++  const s = getSession(req);
++  if (!s) return [];
++  if (s.isAdmin) return null;
++  const list = Array.isArray(s.accessibleBranches) ? s.accessibleBranches : [];
++  if (list.length > 0) return list;
++  return s.branchId ? [s.branchId] : [];
++}
++
++// True if the user can read data for the given branch.
++export function canAccessBranch(req: Request, branchId: number): boolean {
++  const list = accessibleBranchesFor(req);
++  if (list === null) return true; // admin
++  return list.includes(branchId);
++}
++
++function hasPerm(s: BranchSession | null, key: string): boolean {
++  if (!s) return false;
++  if (s.isAdmin) return true;
++  return Boolean(s.permissions?.[key]);
++}
++
++// Permission checks specific to the sessions module.
++export function canEnterSessions(req: Request): boolean {
++  return hasPerm(getSession(req), "canEnterSessions");
++}
++
++export function canManageSessionTargets(req: Request): boolean {
++  return hasPerm(getSession(req), "canManageSessionTargets");
++}
++
++export function canViewSessionsReport(req: Request): boolean {
++  return hasPerm(getSession(req), "canViewSessionsReport");
++}
++
++// Sends 403 + returns false when the user lacks the permission. Caller
++// should `return` immediately on false.
++export function requirePerm(
++  req: Request,
++  res: Response,
++  check: (req: Request) => boolean,
++  message = "ليس لديك صلاحية الوصول إلى هذا القسم",
++): boolean {
++  if (!check(req)) {
++    res.status(403).json({ message });
++    return false;
++  }
++  return true;
++}
++
++// Resolve which branch the request targets, enforcing isolation for
++// non-admins. Returns:
++//   - admin: the requested branchId (number) or null when omitted (= all).
++//   - non-admin: their pinned branchId, ignoring any client-supplied value.
++// Returns undefined when the resolved branchId is invalid, allowing the
++// caller to 400.
++export function resolveBranchId(
++  req: Request,
++  raw: unknown,
++): number | null | undefined {
++  const s = getSession(req);
++  if (!s) return undefined;
++  if (!s.isAdmin) {
++    return s.branchId ?? undefined;
++  }
++  if (raw === undefined || raw === null || raw === "" || raw === "all") {
++    return null;
++  }
++  const n = Number(raw);
++  return Number.isFinite(n) ? n : undefined;
++}
++
++// For mutations that target a specific branch, ensure the caller is
++// allowed. Sends 403 and returns false if not.
++export function requireBranchWriteAccess(
++  req: Request,
++  res: Response,
++  branchId: number,
++): boolean {
++  const s = getSession(req);
++  if (!s) {
++    res.status(401).json({ message: "غير مصرح" });
++    return false;
++  }
++  if (s.isAdmin) return true;
++  const list = accessibleBranchesFor(req);
++  if (list && list.includes(branchId)) return true;
++  res.status(403).json({ message: "لا يمكنك التعديل على فرع غير مركزك" });
++  return false;
++}
+diff --git a/server/sessions_module/routes.ts b/server/sessions_module/routes.ts
+new file mode 100644
+index 0000000..14f75b1
+--- /dev/null
++++ b/server/sessions_module/routes.ts
+@@ -0,0 +1,630 @@
++import type { Express, Request, Response } from "express";
++import { z } from "zod";
++import { and, asc, desc, eq, gte, lte, sql } from "drizzle-orm";
++import { db } from "../db";
++import {
++  branches,
++  devices,
++  dailySessions,
++  sessionCounts,
++  monthlyTargets,
++} from "@shared/schema";
++import { logAudit } from "../accounting/ledger";
++import { getTodayIraq } from "../timezone";
++import {
++  getUserContext,
++  accessibleBranchesFor,
++  canAccessBranch,
++  canEnterSessions,
++  canManageSessionTargets,
++  canViewSessionsReport,
++  requirePerm,
++  resolveBranchId,
++  requireBranchWriteAccess,
++} from "./permissions";
++
++/**
++ * Session Tracking Routes
++ *
++ * /api/session-tracking/*
++ *
++ * Per-branch / per-day / per-shift counts of physiotherapy device usage,
++ * plus monthly targets per branch+device. Reception enters today's
++ * counts; branch managers edit historical data and set targets; admin
++ * does everything across all branches.
++ *
++ * Auth: all routes require a logged-in branchSession. Per-route
++ * permission checks are inline using helpers from ./permissions.
++ *
++ * All writes append to audit_log via logAudit() with entityType
++ * = 'daily_session' or 'monthly_target'.
++ */
++
++// 24-hour edit window for reception users. Branch managers and admins
++// bypass this.
++const RECEPTION_EDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
++
++const shiftSchema = z.enum(["morning", "evening"]);
++const yearSchema = z.coerce.number().int().min(2020).max(2100);
++const monthSchema = z.coerce.number().int().min(1).max(12);
++
++const upsertDailySchema = z.object({
++  branchId: z.coerce.number().int().positive(),
++  sessionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
++  shift: shiftSchema,
++  counts: z
++    .array(
++      z.object({
++        deviceId: z.coerce.number().int().positive(),
++        count: z.coerce.number().int().min(0).max(100000),
++      }),
++    )
++    .max(50),
++});
++
++const upsertTargetsSchema = z.object({
++  branchId: z.coerce.number().int().positive(),
++  year: yearSchema,
++  month: monthSchema,
++  targets: z
++    .array(
++      z.object({
++        deviceId: z.coerce.number().int().positive(),
++        targetCount: z.coerce.number().int().min(0).max(1_000_000),
++      }),
++    )
++    .max(50),
++});
++
++const copyTargetsSchema = z.object({
++  branchId: z.coerce.number().int().positive(),
++  fromYear: yearSchema,
++  fromMonth: monthSchema,
++  toYear: yearSchema,
++  toMonth: monthSchema,
++});
++
++export function registerSessionTrackingRoutes(
++  app: Express,
++  isAuthenticated: any,
++): void {
++  // ==================== المراجع ====================
++
++  // List of branches the requester may act on (used to populate the
++  // branch picker on the entry page).
++  app.get(
++    "/api/session-tracking/branches",
++    isAuthenticated,
++    async (req: Request, res: Response) => {
++      try {
++        const allowed = accessibleBranchesFor(req);
++        const rows = await db.select().from(branches).orderBy(asc(branches.name));
++        const filtered = allowed === null ? rows : rows.filter((b) => allowed.includes(b.id));
++        res.json(filtered);
++      } catch (err) {
++        console.error("[session-tracking] /branches error", err);
++        res.status(500).json({ message: "تعذّر جلب الفروع" });
++      }
++    },
++  );
++
++  // List of active devices in display order.
++  app.get(
++    "/api/session-tracking/devices",
++    isAuthenticated,
++    async (_req: Request, res: Response) => {
++      try {
++        const rows = await db
++          .select()
++          .from(devices)
++          .where(eq(devices.isActive, true))
++          .orderBy(asc(devices.displayOrder), asc(devices.id));
++        res.json(rows);
++      } catch (err) {
++        console.error("[session-tracking] /devices error", err);
++        res.status(500).json({ message: "تعذّر جلب الأجهزة" });
++      }
++    },
++  );
++
++  // ==================== جلسات اليوم ====================
++
++  // Current state for a (branch, date, shift). Returns the session row
++  // (if any) and one count row per active device — zero-filled for
++  // devices that don't have a row yet so the UI can render the full grid.
++  app.get(
++    "/api/session-tracking/daily",
++    isAuthenticated,
++    async (req: Request, res: Response) => {
++      if (!requirePerm(req, res, (r) => canEnterSessions(r) || canViewSessionsReport(r))) return;
++      try {
++        const branchId = resolveBranchId(req, req.query.branchId);
++        if (branchId === undefined || branchId === null) {
++          return res.status(400).json({ message: "branchId مطلوب" });
++        }
++        if (!canAccessBranch(req, branchId)) {
++          return res.status(403).json({ message: "لا تملك وصولاً لهذا الفرع" });
++        }
++        const sessionDate = String(req.query.date ?? "");
++        const shiftRaw = req.query.shift;
++        if (!/^\d{4}-\d{2}-\d{2}$/.test(sessionDate)) {
++          return res.status(400).json({ message: "صيغة التاريخ غير صحيحة" });
++        }
++        const shiftParse = shiftSchema.safeParse(shiftRaw);
++        if (!shiftParse.success) {
++          return res.status(400).json({ message: "shift يجب أن يكون morning أو evening" });
++        }
++        const shift = shiftParse.data;
++
++        const [session] = await db
++          .select()
++          .from(dailySessions)
++          .where(
++            and(
++              eq(dailySessions.branchId, branchId),
++              eq(dailySessions.sessionDate, sessionDate),
++              eq(dailySessions.shift, shift),
++            ),
++          )
++          .limit(1);
++
++        const allDevices = await db
++          .select()
++          .from(devices)
++          .where(eq(devices.isActive, true))
++          .orderBy(asc(devices.displayOrder), asc(devices.id));
++
++        let counts: { deviceId: number; count: number }[] = allDevices.map((d) => ({
++          deviceId: d.id,
++          count: 0,
++        }));
++
++        if (session) {
++          const stored = await db
++            .select()
++            .from(sessionCounts)
++            .where(eq(sessionCounts.dailySessionId, session.id));
++          const map = new Map(stored.map((c) => [c.deviceId, c.count]));
++          counts = allDevices.map((d) => ({ deviceId: d.id, count: map.get(d.id) ?? 0 }));
++        }
++
++        res.json({ session: session ?? null, counts });
++      } catch (err) {
++        console.error("[session-tracking] /daily error", err);
++        res.status(500).json({ message: "تعذّر جلب جلسة اليوم" });
++      }
++    },
++  );
++
++  // Atomic upsert: creates or updates the daily_session row, then
++  // upserts every count value within a single transaction. Audited.
++  app.post(
++    "/api/session-tracking/daily/upsert",
++    isAuthenticated,
++    async (req: Request, res: Response) => {
++      if (!requirePerm(req, res, canEnterSessions)) return;
++      const parsed = upsertDailySchema.safeParse(req.body);
++      if (!parsed.success) {
++        return res.status(400).json({ message: "بيانات غير صحيحة", details: parsed.error.format() });
++      }
++      const { branchId, sessionDate, shift, counts } = parsed.data;
++      if (!requireBranchWriteAccess(req, res, branchId)) return;
++
++      const ctx = getUserContext(req);
++      const today = getTodayIraq();
++      const isReception = ctx.role === "reception";
++
++      // Reception can only enter today's data, never past or future.
++      if (isReception && sessionDate !== today) {
++        return res.status(403).json({
++          message: "موظّف الاستقبال يستطيع إدخال جلسات اليوم الحالي فقط",
++        });
++      }
++
++      try {
++        const result = await db.transaction(async (tx) => {
++          const [existing] = await tx
++            .select()
++            .from(dailySessions)
++            .where(
++              and(
++                eq(dailySessions.branchId, branchId),
++                eq(dailySessions.sessionDate, sessionDate),
++                eq(dailySessions.shift, shift),
++              ),
++            )
++            .limit(1);
++
++          let dailySessionId: number;
++          let action: "create" | "update";
++          let oldCountsForAudit: { deviceId: number; count: number }[] = [];
++
++          if (!existing) {
++            if (!ctx.userId) throw new Error("missing userId on session");
++            const [created] = await tx
++              .insert(dailySessions)
++              .values({
++                branchId,
++                sessionDate,
++                shift,
++                createdBy: ctx.userId,
++              })
++              .returning();
++            dailySessionId = created!.id;
++            action = "create";
++          } else {
++            // Reception: enforce 24-hour edit window from original
++            // creation. Branch managers and admins bypass.
++            if (isReception) {
++              const ageMs = Date.now() - new Date(existing.createdAt).getTime();
++              if (ageMs > RECEPTION_EDIT_WINDOW_MS) {
++                throw new ReceptionWindowError();
++              }
++            }
++            await tx
++              .update(dailySessions)
++              .set({ updatedAt: new Date() })
++              .where(eq(dailySessions.id, existing.id));
++            dailySessionId = existing.id;
++            action = "update";
++            const prior = await tx
++              .select()
++              .from(sessionCounts)
++              .where(eq(sessionCounts.dailySessionId, existing.id));
++            oldCountsForAudit = prior.map((p) => ({ deviceId: p.deviceId, count: p.count }));
++          }
++
++          // Upsert each count. We use ON CONFLICT on the
++          // (daily_session_id, device_id) unique index.
++          for (const c of counts) {
++            await tx
++              .insert(sessionCounts)
++              .values({
++                dailySessionId,
++                deviceId: c.deviceId,
++                count: c.count,
++              })
++              .onConflictDoUpdate({
++                target: [sessionCounts.dailySessionId, sessionCounts.deviceId],
++                set: { count: c.count },
++              });
++          }
++
++          return { dailySessionId, action, oldCountsForAudit };
++        });
++
++        await logAudit({
++          entityType: "daily_session",
++          entityId: result.dailySessionId,
++          action: result.action,
++          userId: ctx.userId,
++          userName: ctx.userName,
++          branchId,
++          oldValues: result.action === "update" ? { counts: result.oldCountsForAudit } : undefined,
++          newValues: { branchId, sessionDate, shift, counts },
++          ipAddress: ctx.ipAddress,
++          userAgent: ctx.userAgent,
++        });
++
++        res.json({ ok: true, dailySessionId: result.dailySessionId, action: result.action });
++      } catch (err: any) {
++        if (err instanceof ReceptionWindowError) {
++          return res.status(403).json({
++            message: "انتهت مدّة التعديل (٢٤ ساعة). يرجى مراجعة المدير.",
++          });
++        }
++        console.error("[session-tracking] /daily/upsert error", err);
++        res.status(500).json({ message: "تعذّر حفظ الجلسة" });
++      }
++    },
++  );
++
++  // ==================== الأهداف الشهرية ====================
++
++  // Returns: { devices, targets, actuals } where targets is the saved
++  // monthly_targets rows for that branch+year+month and actuals is the
++  // sum of session_counts grouped by device for that month.
++  app.get(
++    "/api/session-tracking/monthly",
++    isAuthenticated,
++    async (req: Request, res: Response) => {
++      if (
++        !requirePerm(req, res, (r) =>
++          canEnterSessions(r) || canManageSessionTargets(r) || canViewSessionsReport(r),
++        )
++      )
++        return;
++      try {
++        const branchId = resolveBranchId(req, req.query.branchId);
++        if (branchId === undefined || branchId === null) {
++          return res.status(400).json({ message: "branchId مطلوب" });
++        }
++        if (!canAccessBranch(req, branchId)) {
++          return res.status(403).json({ message: "لا تملك وصولاً لهذا الفرع" });
++        }
++        const yearParse = yearSchema.safeParse(req.query.year);
++        const monthParse = monthSchema.safeParse(req.query.month);
++        if (!yearParse.success || !monthParse.success) {
++          return res.status(400).json({ message: "year / month غير صحيحة" });
++        }
++        const year = yearParse.data;
++        const month = monthParse.data;
++
++        const allDevices = await db
++          .select()
++          .from(devices)
++          .where(eq(devices.isActive, true))
++          .orderBy(asc(devices.displayOrder), asc(devices.id));
++
++        const targets = await db
++          .select()
++          .from(monthlyTargets)
++          .where(
++            and(
++              eq(monthlyTargets.branchId, branchId),
++              eq(monthlyTargets.year, year),
++              eq(monthlyTargets.month, month),
++            ),
++          );
++
++        const monthStart = `${year}-${String(month).padStart(2, "0")}-01`;
++        const lastDay = new Date(year, month, 0).getDate();
++        const monthEnd = `${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
++
++        const actualRows = await db
++          .select({
++            deviceId: sessionCounts.deviceId,
++            total: sql<number>`COALESCE(SUM(${sessionCounts.count}), 0)::int`,
++          })
++          .from(sessionCounts)
++          .innerJoin(dailySessions, eq(sessionCounts.dailySessionId, dailySessions.id))
++          .where(
++            and(
++              eq(dailySessions.branchId, branchId),
++              gte(dailySessions.sessionDate, monthStart),
++              lte(dailySessions.sessionDate, monthEnd),
++            ),
++          )
++          .groupBy(sessionCounts.deviceId);
++
++        const targetsMap = new Map(targets.map((t) => [t.deviceId, t]));
++        const actualsMap = new Map(actualRows.map((a) => [a.deviceId, Number(a.total)]));
++
++        const result = allDevices.map((d) => ({
++          deviceId: d.id,
++          deviceCode: d.code,
++          deviceNameAr: d.nameAr,
++          deviceNameEn: d.nameEn,
++          target: targetsMap.get(d.id)?.targetCount ?? 0,
++          actual: actualsMap.get(d.id) ?? 0,
++        }));
++
++        res.json({ branchId, year, month, devices: result });
++      } catch (err) {
++        console.error("[session-tracking] /monthly error", err);
++        res.status(500).json({ message: "تعذّر جلب البيانات الشهرية" });
++      }
++    },
++  );
++
++  app.post(
++    "/api/session-tracking/targets/upsert",
++    isAuthenticated,
++    async (req: Request, res: Response) => {
++      if (!requirePerm(req, res, canManageSessionTargets)) return;
++      const parsed = upsertTargetsSchema.safeParse(req.body);
++      if (!parsed.success) {
++        return res.status(400).json({ message: "بيانات غير صحيحة", details: parsed.error.format() });
++      }
++      const { branchId, year, month, targets } = parsed.data;
++      if (!requireBranchWriteAccess(req, res, branchId)) return;
++
++      const ctx = getUserContext(req);
++      if (!ctx.userId) {
++        return res.status(401).json({ message: "غير مصرح" });
++      }
++
++      try {
++        await db.transaction(async (tx) => {
++          for (const t of targets) {
++            await tx
++              .insert(monthlyTargets)
++              .values({
++                branchId,
++                deviceId: t.deviceId,
++                year,
++                month,
++                targetCount: t.targetCount,
++                setBy: ctx.userId!,
++              })
++              .onConflictDoUpdate({
++                target: [
++                  monthlyTargets.branchId,
++                  monthlyTargets.deviceId,
++                  monthlyTargets.year,
++                  monthlyTargets.month,
++                ],
++                set: {
++                  targetCount: t.targetCount,
++                  setBy: ctx.userId!,
++                  updatedAt: new Date(),
++                },
++              });
++          }
++        });
++
++        await logAudit({
++          entityType: "monthly_target",
++          entityId: 0, // batch op; entity is (branch, year, month) — see notes
++          action: "upsert_batch",
++          userId: ctx.userId,
++          userName: ctx.userName,
++          branchId,
++          newValues: { year, month, targets },
++          ipAddress: ctx.ipAddress,
++          userAgent: ctx.userAgent,
++          notes: `monthly targets upserted for ${year}-${month}`,
++        });
++
++        res.json({ ok: true });
++      } catch (err) {
++        console.error("[session-tracking] /targets/upsert error", err);
++        res.status(500).json({ message: "تعذّر حفظ الأهداف" });
++      }
++    },
++  );
++
++  app.post(
++    "/api/session-tracking/targets/copy",
++    isAuthenticated,
++    async (req: Request, res: Response) => {
++      if (!requirePerm(req, res, canManageSessionTargets)) return;
++      const parsed = copyTargetsSchema.safeParse(req.body);
++      if (!parsed.success) {
++        return res.status(400).json({ message: "بيانات غير صحيحة", details: parsed.error.format() });
++      }
++      const { branchId, fromYear, fromMonth, toYear, toMonth } = parsed.data;
++      if (!requireBranchWriteAccess(req, res, branchId)) return;
++      const ctx = getUserContext(req);
++      if (!ctx.userId) {
++        return res.status(401).json({ message: "غير مصرح" });
++      }
++      if (fromYear === toYear && fromMonth === toMonth) {
++        return res.status(400).json({ message: "الشهر المصدر والمستهدف متطابقان" });
++      }
++
++      try {
++        const source = await db
++          .select()
++          .from(monthlyTargets)
++          .where(
++            and(
++              eq(monthlyTargets.branchId, branchId),
++              eq(monthlyTargets.year, fromYear),
++              eq(monthlyTargets.month, fromMonth),
++            ),
++          );
++
++        if (source.length === 0) {
++          return res.json({ ok: true, copied: 0 });
++        }
++
++        await db.transaction(async (tx) => {
++          for (const t of source) {
++            await tx
++              .insert(monthlyTargets)
++              .values({
++                branchId,
++                deviceId: t.deviceId,
++                year: toYear,
++                month: toMonth,
++                targetCount: t.targetCount,
++                setBy: ctx.userId!,
++              })
++              .onConflictDoUpdate({
++                target: [
++                  monthlyTargets.branchId,
++                  monthlyTargets.deviceId,
++                  monthlyTargets.year,
++                  monthlyTargets.month,
++                ],
++                set: {
++                  targetCount: t.targetCount,
++                  setBy: ctx.userId!,
++                  updatedAt: new Date(),
++                },
++              });
++          }
++        });
++
++        await logAudit({
++          entityType: "monthly_target",
++          entityId: 0,
++          action: "copy",
++          userId: ctx.userId,
++          userName: ctx.userName,
++          branchId,
++          newValues: { fromYear, fromMonth, toYear, toMonth, copied: source.length },
++          ipAddress: ctx.ipAddress,
++          userAgent: ctx.userAgent,
++        });
++
++        res.json({ ok: true, copied: source.length });
++      } catch (err) {
++        console.error("[session-tracking] /targets/copy error", err);
++        res.status(500).json({ message: "تعذّر نسخ الأهداف" });
++      }
++    },
++  );
++
++  // ==================== التقرير الشامل ====================
++
++  // Returns a list of daily_sessions within [from, to] for a branch
++  // (or all branches when admin omits branchId), with the count rows
++  // joined in. The client will pivot it for display and CSV export.
++  app.get(
++    "/api/session-tracking/list",
++    isAuthenticated,
++    async (req: Request, res: Response) => {
++      if (!requirePerm(req, res, canViewSessionsReport)) return;
++      try {
++        const branchId = resolveBranchId(req, req.query.branchId);
++        if (branchId === undefined) {
++          return res.status(400).json({ message: "branchId غير صحيح" });
++        }
++        const from = String(req.query.from ?? "");
++        const to = String(req.query.to ?? "");
++        if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
++          return res.status(400).json({ message: "from / to تاريخ غير صحيح" });
++        }
++
++        const conditions = [
++          gte(dailySessions.sessionDate, from),
++          lte(dailySessions.sessionDate, to),
++        ];
++        if (branchId !== null) {
++          conditions.push(eq(dailySessions.branchId, branchId));
++        }
++
++        const sessions = await db
++          .select()
++          .from(dailySessions)
++          .where(and(...conditions))
++          .orderBy(desc(dailySessions.sessionDate), asc(dailySessions.shift))
++          .limit(1000);
++
++        const ids = sessions.map((s) => s.id);
++        let counts: { dailySessionId: number; deviceId: number; count: number }[] = [];
++        if (ids.length > 0) {
++          counts = (
++            await db
++              .select()
++              .from(sessionCounts)
++              .where(sql`${sessionCounts.dailySessionId} = ANY(${ids})`)
++          ).map((c) => ({
++            dailySessionId: c.dailySessionId,
++            deviceId: c.deviceId,
++            count: c.count,
++          }));
++        }
++
++        const allDevices = await db
++          .select()
++          .from(devices)
++          .orderBy(asc(devices.displayOrder), asc(devices.id));
++
++        res.json({ sessions, counts, devices: allDevices });
++      } catch (err) {
++        console.error("[session-tracking] /list error", err);
++        res.status(500).json({ message: "تعذّر جلب التقرير" });
++      }
++    },
++  );
++}
++
++class ReceptionWindowError extends Error {
++  constructor() {
++    super("RECEPTION_WINDOW_EXPIRED");
++    this.name = "ReceptionWindowError";
++  }
++}
+diff --git a/shared/schema.ts b/shared/schema.ts
+index 5f973b0..deb2539 100644
+--- a/shared/schema.ts
++++ b/shared/schema.ts
+@@ -451,6 +451,11 @@ export const systemUsers = pgTable("system_users", {
+   // admin toggles them on individually.
+   canEditVisits: boolean("can_edit_visits").default(false),
+   canDeleteVisits: boolean("can_delete_visits").default(false),
++  // Sessions module (migration 009). Reception auto-grants enter, branch
++  // manager auto-grants all three at login.
++  canEnterSessions: boolean("can_enter_sessions").default(false),
++  canManageSessionTargets: boolean("can_manage_session_targets").default(false),
++  canViewSessionsReport: boolean("can_view_sessions_report").default(false),
+   language: text("language").default("ar"), // ar = Arabic, en = English
+   createdAt: timestamp("created_at").defaultNow(),
+   updatedAt: timestamp("updated_at").defaultNow(),
+@@ -585,3 +590,61 @@ export type SurveyResponse = typeof surveyResponses.$inferSelect;
+ export type InsertSurveyResponse = z.infer<typeof insertSurveyResponseSchema>;
+ export type SurveyAnswer = typeof surveyAnswers.$inferSelect;
+ export type InsertSurveyAnswer = z.infer<typeof insertSurveyAnswerSchema>;
++
++// ===========================================================================
++// Session tracking module (migration 009)
++// Per-branch / per-day / per-shift counts for 15 physiotherapy devices,
++// plus monthly targets per branch+device.
++// ===========================================================================
++
++export const devices = pgTable("devices", {
++  id: serial("id").primaryKey(),
++  code: text("code").notNull().unique(),
++  nameAr: text("name_ar").notNull(),
++  nameEn: text("name_en").notNull(),
++  displayOrder: integer("display_order").notNull().default(0),
++  isActive: boolean("is_active").notNull().default(true),
++  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
++});
++
++export const dailySessions = pgTable("daily_sessions", {
++  id: serial("id").primaryKey(),
++  branchId: integer("branch_id").references(() => branches.id).notNull(),
++  sessionDate: date("session_date").notNull(),
++  shift: text("shift").notNull(), // 'morning' | 'evening'
++  createdBy: integer("created_by").references(() => systemUsers.id).notNull(),
++  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
++  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
++});
++
++export const sessionCounts = pgTable("session_counts", {
++  id: serial("id").primaryKey(),
++  dailySessionId: integer("daily_session_id").references(() => dailySessions.id, { onDelete: "cascade" }).notNull(),
++  deviceId: integer("device_id").references(() => devices.id).notNull(),
++  count: integer("count").notNull().default(0),
++});
++
++export const monthlyTargets = pgTable("monthly_targets", {
++  id: serial("id").primaryKey(),
++  branchId: integer("branch_id").references(() => branches.id).notNull(),
++  deviceId: integer("device_id").references(() => devices.id).notNull(),
++  year: integer("year").notNull(),
++  month: integer("month").notNull(),
++  targetCount: integer("target_count").notNull().default(0),
++  setBy: integer("set_by").references(() => systemUsers.id).notNull(),
++  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
++});
++
++export const insertDeviceSchema = createInsertSchema(devices).omit({ id: true, createdAt: true });
++export const insertDailySessionSchema = createInsertSchema(dailySessions).omit({ id: true, createdAt: true, updatedAt: true });
++export const insertSessionCountSchema = createInsertSchema(sessionCounts).omit({ id: true });
++export const insertMonthlyTargetSchema = createInsertSchema(monthlyTargets).omit({ id: true, updatedAt: true });
++
++export type Device = typeof devices.$inferSelect;
++export type InsertDevice = z.infer<typeof insertDeviceSchema>;
++export type DailySession = typeof dailySessions.$inferSelect;
++export type InsertDailySession = z.infer<typeof insertDailySessionSchema>;
++export type SessionCount = typeof sessionCounts.$inferSelect;
++export type InsertSessionCount = z.infer<typeof insertSessionCountSchema>;
++export type MonthlyTarget = typeof monthlyTargets.$inferSelect;
++export type InsertMonthlyTarget = z.infer<typeof insertMonthlyTargetSchema>;
+-- 
+2.43.0
+
